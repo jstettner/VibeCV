@@ -1,0 +1,112 @@
+networks:
+  cv_net:
+
+services:
+  # ------------------------------------------------------------
+  # 1. Camera ingress & restream
+  # ------------------------------------------------------------
+  mediamtx:
+    image: bluenviron/mediamtx:latest
+    container_name: mediamtx
+    restart: unless-stopped
+    networks:
+      - cv_net
+    ports:
+      - "8554:8554"     # RTSP in/out
+      - "1935:1935"     # RTMP in/out (optional)
+      - "8888:8888"     # HTTP‑API / HLS preview
+      - "8889:8889/udp" # RTP/UDP (optional)
+    volumes:
+      - ./mediamtx.yml:/mediamtx.yml:ro   # basic config (push paths, auth, etc.)
+
+  # ------------------------------------------------------------
+  # 2. Message bus (Kafka‑compatible but single‑binary)
+  # ------------------------------------------------------------
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v24.1.1
+    container_name: redpanda
+    command: >
+      redpanda start \
+        --smp 1 \
+        --overprovisioned \
+        --node-id 0 \
+        --check=false \
+        --kafka-addr PLAINTEXT://0.0.0.0:9092 \
+        --advertise-kafka-addr PLAINTEXT://redpanda:9092
+    networks:
+      - cv_net
+    ports:
+      - "9092:9092"   # Kafka API
+
+  # ------------------------------------------------------------
+  # 3. Frame sampler (FFmpeg + Python)  →  Kafka topic "frames"
+  # ------------------------------------------------------------
+  sampler:
+    build: ./sampler        # Dockerfile installs ffmpeg, opencv‑python, kafka‑python
+    container_name: sampler
+    restart: unless-stopped
+    depends_on:
+      - redpanda
+      - mediamtx
+    environment:
+      KAFKA_BROKER: redpanda:9092
+      TOPIC: frames
+      CAM_RTSP: rtsp://mediamtx:8554/live/iphone
+    networks:
+      - cv_net
+
+  # ------------------------------------------------------------
+  # 4. Inference worker  →  Kafka topic "detections"
+  # ------------------------------------------------------------
+  inference:
+    build: ./inference       # Dockerfile installs torch / ultralytics / kafka‑python
+    container_name: inference
+    restart: unless-stopped
+    depends_on:
+      - redpanda
+    environment:
+      KAFKA_BROKER: redpanda:9092
+      IN_TOPIC: frames
+      OUT_TOPIC: detections
+    networks:
+      - cv_net
+    # Uncomment below if host has NVIDIA GPU drivers + Docker runtime
+    #runtime: nvidia
+    #environment:
+    #  - NVIDIA_VISIBLE_DEVICES=all
+  #
+  # # ------------------------------------------------------------
+  # # 5. Object storage for clips / thumbnails
+  # # ------------------------------------------------------------
+  # minio:
+  #   image: minio/minio:RELEASE.2024-04-18T01-20-51Z
+  #   container_name: minio
+  #   command: server /data --console-address ":9001"
+  #   environment:
+  #     MINIO_ROOT_USER: minioadmin
+  #     MINIO_ROOT_PASSWORD: minioadmin
+  #   ports:
+  #     - "9000:9000"   # S3
+  #     - "9001:9001"   # Console UI
+  #   volumes:
+  #     - ./minio-data:/data
+  #   networks:
+  #     - cv_net
+  #
+  # # ------------------------------------------------------------
+  # # 6. Time‑series & metadata DB (TimescaleDB)
+  # # ------------------------------------------------------------
+  # timescaledb:
+  #   image: timescale/timescaledb-postgis:latest-pg14
+  #   container_name: timescaledb
+  #   environment:
+  #     POSTGRES_USER: postgres
+  #     POSTGRES_PASSWORD: postgres
+  #     POSTGRES_DB: cv
+  #   ports:
+  #     - "5432:5432"
+  #   volumes:
+  #     - ./pgdata:/var/lib/postgresql/data
+  #   networks:
+  #     - cv_net
+
