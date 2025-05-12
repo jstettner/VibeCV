@@ -1,10 +1,5 @@
 # This file can overwrite https://github.com/bluenviron/mediamtx/blob/main/mediamtx.yml
-#
-#
-# runOnConnect: /bin/sh -c echo "📡 iPhone live"
-# runOnDisconnect: /bin/sh -c echo "📴 iPhone ended"
 
 paths:
   live/iphone:            # ← use the same name you embed in the URL
-
 

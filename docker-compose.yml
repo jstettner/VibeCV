@@ -59,7 +59,7 @@ services:
   # 4. Inference worker  →  Kafka topic "detections"
   # ------------------------------------------------------------
   inference:
-    build: ./inference       # Dockerfile installs torch / ultralytics / kafka‑python
+    build: ./inference
     container_name: inference
     restart: unless-stopped
     depends_on:
@@ -70,14 +70,28 @@ services:
       OUT_TOPIC: detections
     networks:
       - cv_net
+    volumes:
+      - shared-frames:/frames        # writes cam1.jpg here
     # Uncomment below if host has NVIDIA GPU drivers + Docker runtime
     #runtime: nvidia
     #environment:
     #  - NVIDIA_VISIBLE_DEVICES=all
-  #
-  # # ------------------------------------------------------------
-  # # 5. Object storage for clips / thumbnails
-  # # ------------------------------------------------------------
+
+  # ------------------------------------------------------------
+  # 5. Preview Server
+  # ------------------------------------------------------------
+  preview:
+    build: ./preview
+    ports:
+      - "8000:8000"                  # http://localhost:8000/stream
+    volumes:
+      - shared-frames:/frames:ro     # read-only in the side-car
+    depends_on:
+      - inference
+
+  # ------------------------------------------------------------
+  # 6. Object storage for clips / thumbnails
+  # ------------------------------------------------------------
   # minio:
   #   image: minio/minio:RELEASE.2024-04-18T01-20-51Z
   #   container_name: minio
@@ -93,9 +107,9 @@ services:
   #   networks:
   #     - cv_net
   #
-  # # ------------------------------------------------------------
-  # # 6. Time‑series & metadata DB (TimescaleDB)
-  # # ------------------------------------------------------------
+  # ------------------------------------------------------------
+  # 7. Time‑series & metadata DB (TimescaleDB)
+  # ------------------------------------------------------------
   # timescaledb:
   #   image: timescale/timescaledb-postgis:latest-pg14
   #   container_name: timescaledb
@@ -110,3 +124,7 @@ services:
   #   networks:
   #     - cv_net
 
+volumes:
+  shared-frames:
+    driver: local
+    driver_opts: {type: tmpfs, device: tmpfs}   # in-RAM, fast, auto-cleans
