@@ -1,5 +1,5 @@
 # This file can overwrite https://github.com/bluenviron/mediamtx/blob/main/mediamtx.yml
 
 paths:
-  live/iphone:            # ← use the same name you embed in the URL
-
+  demo:
+    source: publisher

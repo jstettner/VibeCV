@@ -3,6 +3,17 @@ networks:
 
 services:
   # ------------------------------------------------------------
+  # 0. Demo camera
+  # ------------------------------------------------------------
+  demo_cam:
+    build: ./demo_cam
+    depends_on: [mediamtx]
+    networks: [cv_net]           # same network so "mediamtx" DNS works
+    environment:
+      MEDIAMTX_URL: rtsp://mediamtx:8554/demo
+      FPS: 25
+
+  # ------------------------------------------------------------
   # 1. Camera ingress & restream
   # ------------------------------------------------------------
   mediamtx:
@@ -51,7 +62,7 @@ services:
     environment:
       KAFKA_BROKER: redpanda:9092
       TOPIC: frames
-      CAM_RTSP: rtsp://mediamtx:8554/live/iphone
+      CAM_RTSP: rtsp://mediamtx:8554/demo
     networks:
       - cv_net
 

@@ -1,11 +1,11 @@
 """
 inference/worker.py
 ────────────────────────────────────────────────────────────────
-A no-dependency demo “inference” node that uses only OpenCV.
+A demo “inference” node that uses OpenCV and YOLOv8.
 
 Pipeline
 --------
-Kafka (frames topic, JPEG bytes)  ─►  OpenCV (background model)
+Kafka (frames topic, JPEG bytes)  ─►  YOLOv8 (object detection)
                                    ─►  bounding-box drawing
                                    ├─►  Kafka (detections topic, JSON)
                                    └─►  /frames/cam1.jpg  (for preview sidecar)
@@ -23,15 +23,18 @@ import cv2
 import kafka
 import numpy as np
 from kafka.errors import KafkaError
+from ultralytics import YOLO
 
 # ───────────────────────── Config via env vars ──────────────────────────
 KAFKA_BROKER   = os.getenv("KAFKA_BROKER", "redpanda:9092")
 IN_TOPIC       = os.getenv("IN_TOPIC", "frames")
 OUT_TOPIC      = os.getenv("OUT_TOPIC", "detections")
 FRAME_PATH     = Path(os.getenv("FRAME_PATH", "/frames/cam1.jpg"))
-MIN_AREA_PX    = int(os.getenv("MIN_AREA_PX", "1500"))      # ignore blobs < this
+# MIN_AREA_PX    = int(os.getenv("MIN_AREA_PX", "1500"))      # No longer used with YOLO
 FRAME_RATE_OUT = float(os.getenv("TARGET_FPS", "5"))        # jpeg write cap
 JPEG_QUALITY   = int(os.getenv("JPEG_Q", "80"))
+MODEL_NAME     = os.getenv("MODEL_NAME", "yolov8n.pt") # Nano model, good balance of speed/accuracy
+CONFIDENCE_THRESHOLD = float(os.getenv("CONFIDENCE_THRESHOLD", "0.4")) # Min detection confidence
 
 # ───────────────────────── Kafka setup ──────────────────────────────────
 consumer = kafka.KafkaConsumer(
@@ -39,7 +42,7 @@ consumer = kafka.KafkaConsumer(
     bootstrap_servers=KAFKA_BROKER,
     value_deserializer=lambda b: b,  # keep raw JPEG bytes
     auto_offset_reset="latest",
-    group_id="inference-opencv",
+    group_id="inference-yolo", # Changed group_id to reflect new model
     enable_auto_commit=True,
 )
 
@@ -48,13 +51,27 @@ producer = kafka.KafkaProducer(
     value_serializer=lambda d: json.dumps(d).encode(),
 )
 
-# ───────────────────────── OpenCV helpers ───────────────────────────────
-bg = cv2.createBackgroundSubtractorMOG2(history=500, varThreshold=16, detectShadows=True)
+# ───────────────────────── YOLO Model ───────────────────────────────
+# Load a pre-trained YOLOv8 model
+try:
+    model = YOLO(MODEL_NAME)
+    print(f"✅ YOLO model '{MODEL_NAME}' loaded successfully.", flush=True)
+except Exception as e:
+    print(f"❌ Error loading YOLO model '{MODEL_NAME}': {e}", file=sys.stderr, flush=True)
+    sys.exit(1)
 
-def jpeg_to_array(buf: bytes) -> np.ndarray:
+
+def jpeg_to_array(buf: bytes) -> np.ndarray | None:
     """Decode JPEG bytes → BGR ndarray."""
-    img_arr = np.frombuffer(buf, dtype=np.uint8)
-    return cv2.imdecode(img_arr, cv2.IMREAD_COLOR)
+    try:
+        img_arr = np.frombuffer(buf, dtype=np.uint8)
+        frame = cv2.imdecode(img_arr, cv2.IMREAD_COLOR)
+        if frame is None:
+            print("[inference] Frame decoding failed.", file=sys.stderr)
+        return frame
+    except Exception as e:
+        print(f"[inference] Error decoding JPEG: {e}", file=sys.stderr)
+        return None
 
 def write_preview(frame: np.ndarray) -> None:
     """Save annotated frame to shared volume for the preview side-car."""
@@ -68,11 +85,12 @@ running = True
 def _exit(_sig, _frm):
     global running
     running = False
+    print("[inference] Signal received, initiating shutdown...", flush=True)
 signal.signal(signal.SIGTERM, _exit)
 signal.signal(signal.SIGINT,  _exit)
 
 # ───────────────────────── Main loop ────────────────────────────────────
-print("[inference] 🏃‍♂️  Starting loop…", flush=True)
+print("🏃 Starting YOLO inference loop…", flush=True)
 next_preview_time = 0.0
 
 for msg in consumer:
@@ -83,38 +101,51 @@ for msg in consumer:
     if frame is None:
         continue
 
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    fgmask = bg.apply(gray)
-
-    # Basic morphological cleanup
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    fgmask = cv2.morphologyEx(fgmask, cv2.MORPH_OPEN, kernel, iterations=2)
-
-    contours, _ = cv2.findContours(fgmask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    # Perform object detection
+    results = model.predict(frame, verbose=False, conf=CONFIDENCE_THRESHOLD) # verbose=False to reduce console spam
 
     detections = []
-    for cnt in contours:
-        area = cv2.contourArea(cnt)
-        if area < MIN_AREA_PX:
-            continue
-        x, y, w, h = cv2.boundingRect(cnt)
-        detections.append({"x": int(x), "y": int(y), "w": int(w), "h": int(h), "area": int(area)})
-        cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+    if results and results[0].boxes:
+        for box in results[0].boxes:
+            x1, y1, x2, y2 = map(int, box.xyxy[0])
+            conf = float(box.conf[0])
+            cls_id = int(box.cls[0])
+            label = model.names[cls_id]
+
+            if label == "person": # Filter for 'person' detections
+                detections.append({
+                    "x": x1, "y": y1,
+                    "w": x2 - x1, "h": y2 - y1,
+                    "confidence": conf,
+                    "class": label
+                })
+                # Draw bounding box
+                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                # Add label
+                label_text = f"{label}: {conf:.2f}"
+                cv2.putText(frame, label_text, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
     # Publish detections JSON (one message per frame)
-    try:
-        producer.send(OUT_TOPIC, {"ts": time.time(), "count": len(detections), "boxes": detections})
-    except KafkaError as e:
-        print(f"[inference] KafkaError: {e}", file=sys.stderr)
+    if detections: # Only send if there are relevant (person) detections
+        try:
+            producer.send(OUT_TOPIC, {"ts": time.time(), "count": len(detections), "boxes": detections})
+        except KafkaError as e:
+            print(f"[inference] KafkaError sending detections: {e}", file=sys.stderr)
 
-    # Throttle preview writes so we don't spam the side-car
+    # Throttle preview writes
     now = time.time()
     if now >= next_preview_time:
         write_preview(frame)
         next_preview_time = now + 1.0 / FRAME_RATE_OUT
 
-print("[inference] ✋ Shutting down…")
-producer.flush()
-producer.close()
-consumer.close()
+print("[inference] ✋ Shutting down consumer and producer…")
+if consumer:
+    consumer.close()
+    print("[inference] Consumer closed.", flush=True)
+if producer:
+    producer.flush()
+    producer.close()
+    print("[inference] Producer flushed and closed.", flush=True)
+
+print("[inference] Shutdown complete.", flush=True)
 
