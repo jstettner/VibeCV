@@ -5,7 +5,7 @@ from time import sleep
 from PIL import Image
 import io
 
-FRAME_PATH = Path("/frames/cam1.jpg")   # shared tmpfs / volume
+FRAME_PATH = Path("/frames/demo.jpg")   # shared tmpfs / volume
 app = FastAPI()
 
 def mjpeg():

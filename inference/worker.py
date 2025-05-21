@@ -111,6 +111,7 @@ print("🏃 Starting inference loop…", flush=True)
 
 for msg in consumer:
     if not running:
+        print("not running")
         break
 
     # Extract metadata from the message
@@ -133,6 +134,7 @@ for msg in consumer:
 
     # Process the frame through tenant-specific logic
     try:
+        current_time = time.strftime("%H:%M:%S", time.localtime())
         annotated_frame, detections = inference_engine.process_frame(frame, metadata)
         
         # Add the frame to the buffer for event detection
@@ -142,6 +144,7 @@ for msg in consumer:
         if detections["count"] > 0 and "detections" in out_topics:
             try:
                 producer.send(out_topics["detections"], detections)
+                print(f"[{current_time}] [inference] Sent {detections['count']} detections to {out_topics['detections']}")
             except KafkaError as e:
                 print(f"[inference] KafkaError sending detections: {e}", file=sys.stderr)
         
