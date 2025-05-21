@@ -1,14 +1,14 @@
 """
-inference/worker.py
+inference/worker.py — Modular inference using tenant-specific code
 ────────────────────────────────────────────────────────────────
-A demo “inference” node that uses OpenCV and YOLOv8.
+A modular inference node that loads tenant-specific inference logic.
 
 Pipeline
 --------
-Kafka (frames topic, JPEG bytes)  ─►  YOLOv8 (object detection)
-                                   ─►  bounding-box drawing
-                                   ├─►  Kafka (detections topic, JSON)
-                                   └─►  /frames/cam1.jpg  (for preview sidecar)
+Kafka (frames topic, JPEG bytes)  ─►  Tenant-specific inference
+                                  ├─►  Kafka (detections topic, JSON)
+                                  ├─►  Kafka (events topic, JSON)
+                                  └─►  /frames/{camera_id}.jpg  (for preview)
 """
 
 import io
@@ -17,24 +17,43 @@ import os
 import signal
 import sys
 import time
+import importlib.util
 from pathlib import Path
+from typing import Dict, Any, List
 
 import cv2
 import kafka
 import numpy as np
 from kafka.errors import KafkaError
-from ultralytics import YOLO
 
 # ───────────────────────── Config via env vars ──────────────────────────
-KAFKA_BROKER   = os.getenv("KAFKA_BROKER", "redpanda:9092")
-IN_TOPIC       = os.getenv("IN_TOPIC", "frames")
-OUT_TOPIC      = os.getenv("OUT_TOPIC", "detections")
-FRAME_PATH     = Path(os.getenv("FRAME_PATH", "/frames/cam1.jpg"))
-# MIN_AREA_PX    = int(os.getenv("MIN_AREA_PX", "1500"))      # No longer used with YOLO
-FRAME_RATE_OUT = float(os.getenv("TARGET_FPS", "5"))        # jpeg write cap
-JPEG_QUALITY   = int(os.getenv("JPEG_Q", "80"))
-MODEL_NAME     = os.getenv("MODEL_NAME", "yolov8n.pt") # Nano model, good balance of speed/accuracy
-CONFIDENCE_THRESHOLD = float(os.getenv("CONFIDENCE_THRESHOLD", "0.4")) # Min detection confidence
+KAFKA_BROKER = os.getenv("KAFKA_BROKER", "redpanda:9092")
+IN_TOPIC = os.getenv("IN_TOPIC", "frames.default")
+FRAME_PATH_TEMPLATE = os.getenv("FRAME_PATH_TEMPLATE", "/frames/{camera_id}.jpg")
+TENANT_ID = os.getenv("TENANT_ID", "default")
+TENANT_MODULE_PATH = os.getenv("TENANT_INFERENCE_PATH", "/app/tenant/inference/default_inference.py")
+TENANT_CLASS_NAME = os.getenv("TENANT_INFERENCE_CLASS", "DefaultInference")
+
+# ───────────────────────── Load tenant-specific inference ──────────────────────────
+try:
+    spec = importlib.util.spec_from_file_location("tenant_inference", TENANT_MODULE_PATH)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Failed to load spec from {TENANT_MODULE_PATH}")
+    
+    tenant_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tenant_module)
+    
+    InferenceClass = getattr(tenant_module, TENANT_CLASS_NAME)
+    inference_engine = InferenceClass()
+    
+    print(f"✅ Loaded tenant inference: {TENANT_CLASS_NAME} from {TENANT_MODULE_PATH}", flush=True)
+except Exception as e:
+    print(f"❌ Failed to load tenant inference: {e}", file=sys.stderr, flush=True)
+    sys.exit(1)
+
+# ───────────────────────── Initialize tenant inference ──────────────────────────
+tenant_config = {k: v for k, v in os.environ.items()}  # Pass all environment variables
+inference_engine.initialize(tenant_config)
 
 # ───────────────────────── Kafka setup ──────────────────────────────────
 consumer = kafka.KafkaConsumer(
@@ -42,24 +61,17 @@ consumer = kafka.KafkaConsumer(
     bootstrap_servers=KAFKA_BROKER,
     value_deserializer=lambda b: b,  # keep raw JPEG bytes
     auto_offset_reset="latest",
-    group_id="inference-yolo", # Changed group_id to reflect new model
+    group_id=f"inference-{TENANT_ID}", 
     enable_auto_commit=True,
 )
+
+# Get output topics from tenant-specific logic
+out_topics = inference_engine.get_output_topics()
 
 producer = kafka.KafkaProducer(
     bootstrap_servers=KAFKA_BROKER,
     value_serializer=lambda d: json.dumps(d).encode(),
 )
-
-# ───────────────────────── YOLO Model ───────────────────────────────
-# Load a pre-trained YOLOv8 model
-try:
-    model = YOLO(MODEL_NAME)
-    print(f"✅ YOLO model '{MODEL_NAME}' loaded successfully.", flush=True)
-except Exception as e:
-    print(f"❌ Error loading YOLO model '{MODEL_NAME}': {e}", file=sys.stderr, flush=True)
-    sys.exit(1)
-
 
 def jpeg_to_array(buf: bytes) -> np.ndarray | None:
     """Decode JPEG bytes → BGR ndarray."""
@@ -73,12 +85,17 @@ def jpeg_to_array(buf: bytes) -> np.ndarray | None:
         print(f"[inference] Error decoding JPEG: {e}", file=sys.stderr)
         return None
 
-def write_preview(frame: np.ndarray) -> None:
+def write_preview(frame: np.ndarray, camera_id: str) -> None:
     """Save annotated frame to shared volume for the preview side-car."""
-    ok, enc = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
+    frame_path = Path(FRAME_PATH_TEMPLATE.format(camera_id=camera_id))
+    ok, enc = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
     if ok:
-        FRAME_PATH.parent.mkdir(parents=True, exist_ok=True)
-        FRAME_PATH.write_bytes(enc.tobytes())
+        frame_path.parent.mkdir(parents=True, exist_ok=True)
+        frame_path.write_bytes(enc.tobytes())
+
+# ───────────────────────── Event processing timer ──────────────────────────
+last_event_check = time.time()
+EVENT_CHECK_INTERVAL = float(os.getenv("EVENT_CHECK_INTERVAL", "1.0"))  # seconds
 
 # ───────────────────────── Graceful shutdown ────────────────────────────
 running = True
@@ -90,53 +107,77 @@ signal.signal(signal.SIGTERM, _exit)
 signal.signal(signal.SIGINT,  _exit)
 
 # ───────────────────────── Main loop ────────────────────────────────────
-print("🏃 Starting YOLO inference loop…", flush=True)
-next_preview_time = 0.0
+print("🏃 Starting inference loop…", flush=True)
 
 for msg in consumer:
     if not running:
         break
 
+    # Extract metadata from the message
+    # In a real system, this would come from Kafka message metadata
+    # For this prototype, we'll parse from the topic name
+    topic_parts = msg.topic.split('.')
+    camera_id = topic_parts[-1] if len(topic_parts) > 1 else "default"
+    
+    metadata = {
+        "timestamp": time.time(),
+        "camera_id": camera_id,
+        "tenant_id": TENANT_ID,
+        "topic": msg.topic
+    }
+
+    # Decode the JPEG frame
     frame = jpeg_to_array(msg.value)
     if frame is None:
         continue
 
-    # Perform object detection
-    results = model.predict(frame, verbose=False, conf=CONFIDENCE_THRESHOLD) # verbose=False to reduce console spam
-
-    detections = []
-    if results and results[0].boxes:
-        for box in results[0].boxes:
-            x1, y1, x2, y2 = map(int, box.xyxy[0])
-            conf = float(box.conf[0])
-            cls_id = int(box.cls[0])
-            label = model.names[cls_id]
-
-            if label == "person": # Filter for 'person' detections
-                detections.append({
-                    "x": x1, "y": y1,
-                    "w": x2 - x1, "h": y2 - y1,
-                    "confidence": conf,
-                    "class": label
-                })
-                # Draw bounding box
-                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                # Add label
-                label_text = f"{label}: {conf:.2f}"
-                cv2.putText(frame, label_text, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-
-    # Publish detections JSON (one message per frame)
-    if detections: # Only send if there are relevant (person) detections
-        try:
-            producer.send(OUT_TOPIC, {"ts": time.time(), "count": len(detections), "boxes": detections})
-        except KafkaError as e:
-            print(f"[inference] KafkaError sending detections: {e}", file=sys.stderr)
-
-    # Throttle preview writes
-    now = time.time()
-    if now >= next_preview_time:
-        write_preview(frame)
-        next_preview_time = now + 1.0 / FRAME_RATE_OUT
+    # Process the frame through tenant-specific logic
+    try:
+        annotated_frame, detections = inference_engine.process_frame(frame, metadata)
+        
+        # Add the frame to the buffer for event detection
+        inference_engine.buffer_frame(frame, metadata, detections)
+        
+        # Send detection results to Kafka
+        if detections["count"] > 0 and "detections" in out_topics:
+            try:
+                producer.send(out_topics["detections"], detections)
+            except KafkaError as e:
+                print(f"[inference] KafkaError sending detections: {e}", file=sys.stderr)
+        
+        # Write the annotated frame for preview
+        write_preview(annotated_frame, camera_id)
+        
+        # Periodically check for events
+        now = time.time()
+        if now - last_event_check >= EVENT_CHECK_INTERVAL:
+            last_event_check = now
+            
+            # Detect events across buffered frames
+            events = inference_engine.detect_events()
+            
+            # Send events to Kafka
+            if events and "events" in out_topics:
+                for event in events:
+                    try:
+                        producer.send(out_topics["events"], event)
+                    except KafkaError as e:
+                        print(f"[inference] KafkaError sending event: {e}", file=sys.stderr)
+            
+            # Get and process any clips or thumbnails
+            # In a real system, these would be uploaded to MinIO
+            # For now, we just log them
+            clips = inference_engine.get_clips()
+            thumbnails = inference_engine.get_thumbnails()
+            
+            if clips:
+                print(f"[inference] Generated {len(clips)} clips", flush=True)
+            
+            if thumbnails:
+                print(f"[inference] Generated {len(thumbnails)} thumbnails", flush=True)
+                
+    except Exception as e:
+        print(f"[inference] Error processing frame: {e}", file=sys.stderr)
 
 print("[inference] ✋ Shutting down consumer and producer…")
 if consumer:
@@ -148,4 +189,3 @@ if producer:
     print("[inference] Producer flushed and closed.", flush=True)
 
 print("[inference] Shutdown complete.", flush=True)
-

@@ -28,7 +28,7 @@ services:
       - "8888:8888" # HTTP‑API / HLS preview
       - "8889:8889/udp" # RTP/UDP (optional)
     volumes:
-      - ./mediamtx.yml:/mediamtx.yml:ro # basic config (push paths, auth, etc.)
+      - ./tenants/${TENANT_ID:-default}/configs/mediamtx.yml:/mediamtx.yml:ro # tenant-specific config
 
   # ------------------------------------------------------------
   # 2. Message bus (Kafka‑compatible but single‑binary)
@@ -50,10 +50,12 @@ services:
       - "9092:9092" # Kafka API
 
   # ------------------------------------------------------------
-  # 3. Frame sampler (FFmpeg + Python)  →  Kafka topic "frames"
+  # 3. Frame sampler (FFmpeg + Python)  →  Kafka topic "frames.{camera_id}"
   # ------------------------------------------------------------
   sampler:
-    build: ./sampler # Dockerfile installs ffmpeg, opencv‑python, kafka‑python
+    build:
+      context: ./
+      dockerfile: ./sampler/Dockerfile
     container_name: sampler
     restart: unless-stopped
     depends_on:
@@ -61,28 +63,45 @@ services:
       - mediamtx
     environment:
       KAFKA_BROKER: redpanda:9092
-      TOPIC: frames
       CAM_RTSP: rtsp://mediamtx:8554/demo
+      CAMERA_ID: demo
+      TENANT_ID: ${TENANT_ID:-default}
+      TENANT_SAMPLER_PATH: /app/tenant/sampler/default_sampler.py
+      TENANT_SAMPLER_CLASS: DefaultSampler
+      TARGET_FPS: 5
+      JPEG_Q: 80
     networks:
       - cv_net
+    volumes:
+      - ./interfaces:/app/interfaces:ro
+      - ./tenants/${TENANT_ID:-default}/sampler:/app/tenant/sampler:ro
 
   # ------------------------------------------------------------
-  # 4. Inference worker  →  Kafka topic "detections"
+  # 4. Inference worker  →  Kafka topic "detections" & "events"
   # ------------------------------------------------------------
   inference:
-    build: ./inference
+    build:
+      context: ./
+      dockerfile: ./inference/Dockerfile
     container_name: inference
     restart: unless-stopped
     depends_on:
       - redpanda
     environment:
       KAFKA_BROKER: redpanda:9092
-      IN_TOPIC: frames
-      OUT_TOPIC: detections
+      IN_TOPIC: frames.demo
+      TENANT_ID: ${TENANT_ID:-default}
+      TENANT_INFERENCE_PATH: /app/tenant/inference/default_inference.py
+      TENANT_INFERENCE_CLASS: DefaultInference
+      CONFIDENCE_THRESHOLD: 0.4
+      MODEL_NAME: yolov8n.pt
+      EVENT_CHECK_INTERVAL: 1.0
     networks:
       - cv_net
     volumes:
       - shared-frames:/frames # writes cam1.jpg here
+      - ./interfaces:/app/interfaces:ro
+      - ./tenants/${TENANT_ID:-default}/inference:/app/tenant/inference:ro
     # Uncomment below if host has NVIDIA GPU drivers + Docker runtime
     #runtime: nvidia
     #environment:
