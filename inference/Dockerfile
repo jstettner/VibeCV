@@ -9,4 +9,3 @@ RUN pip install --no-cache-dir opencv-python-headless kafka-python pillow ultral
 
 COPY worker.py /worker.py
 CMD ["python", "/worker.py"]
-

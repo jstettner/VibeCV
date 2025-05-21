@@ -8,7 +8,7 @@ services:
   demo_cam:
     build: ./demo_cam
     depends_on: [mediamtx]
-    networks: [cv_net]           # same network so "mediamtx" DNS works
+    networks: [cv_net] # same network so "mediamtx" DNS works
     environment:
       MEDIAMTX_URL: rtsp://mediamtx:8554/demo
       FPS: 25
@@ -23,12 +23,12 @@ services:
     networks:
       - cv_net
     ports:
-      - "8554:8554"     # RTSP in/out
-      - "1935:1935"     # RTMP in/out (optional)
-      - "8888:8888"     # HTTP‑API / HLS preview
+      - "8554:8554" # RTSP in/out
+      - "1935:1935" # RTMP in/out (optional)
+      - "8888:8888" # HTTP‑API / HLS preview
       - "8889:8889/udp" # RTP/UDP (optional)
     volumes:
-      - ./mediamtx.yml:/mediamtx.yml:ro   # basic config (push paths, auth, etc.)
+      - ./mediamtx.yml:/mediamtx.yml:ro # basic config (push paths, auth, etc.)
 
   # ------------------------------------------------------------
   # 2. Message bus (Kafka‑compatible but single‑binary)
@@ -47,13 +47,13 @@ services:
     networks:
       - cv_net
     ports:
-      - "9092:9092"   # Kafka API
+      - "9092:9092" # Kafka API
 
   # ------------------------------------------------------------
   # 3. Frame sampler (FFmpeg + Python)  →  Kafka topic "frames"
   # ------------------------------------------------------------
   sampler:
-    build: ./sampler        # Dockerfile installs ffmpeg, opencv‑python, kafka‑python
+    build: ./sampler # Dockerfile installs ffmpeg, opencv‑python, kafka‑python
     container_name: sampler
     restart: unless-stopped
     depends_on:
@@ -82,7 +82,7 @@ services:
     networks:
       - cv_net
     volumes:
-      - shared-frames:/frames        # writes cam1.jpg here
+      - shared-frames:/frames # writes cam1.jpg here
     # Uncomment below if host has NVIDIA GPU drivers + Docker runtime
     #runtime: nvidia
     #environment:
@@ -94,9 +94,9 @@ services:
   preview:
     build: ./preview
     ports:
-      - "8000:8000"                  # http://localhost:8000/stream
+      - "8000:8000" # http://localhost:8000/stream
     volumes:
-      - shared-frames:/frames:ro     # read-only in the side-car
+      - shared-frames:/frames:ro # read-only in the side-car
     depends_on:
       - inference
 
@@ -138,4 +138,4 @@ services:
 volumes:
   shared-frames:
     driver: local
-    driver_opts: {type: tmpfs, device: tmpfs}   # in-RAM, fast, auto-cleans
+    driver_opts: { type: tmpfs, device: tmpfs } # in-RAM, fast, auto-cleans
