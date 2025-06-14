@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Argus is a computer vision system for processing video streams with person detection capabilities. The system operates as a set of connected Docker containers, each handling a specific part of the video processing pipeline.
+Ambral is a computer vision system for processing video streams with person detection capabilities. The system operates as a set of connected Docker containers, each handling a specific part of the video processing pipeline.
 
 ## Build & Run Commands
 
@@ -30,6 +30,7 @@ TENANT_ID=tenant1 docker compose up -d
 ### Streaming Video
 
 1. From an iPhone:
+
    - Download Streamcast Pro from the App Store
    - Get your LAN IP address: `ipconfig getifaddr en0`
    - Configure Streamcast Pro with URL: `rtmp://<your-ip>:1935/live/iphone`
@@ -46,25 +47,29 @@ TENANT_ID=tenant1 docker compose up -d
 
 ## System Architecture
 
-The Argus system works as a pipeline of connected components:
+The Ambral system works as a pipeline of connected components:
 
 1. **Video Ingestion** (`mediamtx`)
+
    - RTSP/RTMP streaming server based on MediaMTX
    - Accepts streams from demo_cam or external sources like iPhones
    - Exposes ports 8554 (RTSP), 1935 (RTMP), 8888 (HTTP API)
 
 2. **Message Bus** (`redpanda`)
+
    - Kafka-compatible message broker for stream processing
    - Used for frame and detection data exchange between components
    - Runs on port 9092
 
 3. **Frame Sampling** (`sampler`)
+
    - Captures frames from video streams at controlled intervals
    - Publishes JPEG-encoded frames to Kafka `frames` topic
    - Configurable framerate via `TARGET_FPS` environment variable
    - Implements the `SamplingInterface` for tenant-specific customization
 
 4. **Inference** (`inference`)
+
    - Subscribes to the `frames` topic
    - Performs object detection using YOLOv8 model to detect people
    - Draws bounding boxes around detected people
@@ -73,6 +78,7 @@ The Argus system works as a pipeline of connected components:
    - Implements the `InferenceInterface` for tenant-specific customization
 
 5. **Preview Server** (`preview`)
+
    - Serves processed frames with detection visualizations
    - Simple FastAPI-based MJPEG streaming server
    - Available at http://localhost:8000/stream
@@ -84,15 +90,16 @@ The Argus system works as a pipeline of connected components:
 ## Data Flow
 
 ```
-External camera/iPhone → MediaMTX → Sampler → Kafka (frames topic) → 
+External camera/iPhone → MediaMTX → Sampler → Kafka (frames topic) →
 Inference → Kafka (detections topic) + shared volume → Preview Server → Browser
 ```
 
 ## Tenant System
 
-Argus uses a tenant system that allows for customized processing logic for different use cases:
+Ambral uses a tenant system that allows for customized processing logic for different use cases:
 
 1. **Tenant Structure**:
+
    ```
    tenants/
    ├── default/              # Default tenant configuration
@@ -103,10 +110,12 @@ Argus uses a tenant system that allows for customized processing logic for diffe
    ```
 
 2. **Key Interface Files**:
+
    - `/interfaces/sampling_interface.py`: Abstract base class for frame sampling logic
    - `/interfaces/inference_interface.py`: Abstract base class for detection and event processing
 
 3. **Implementing Custom Components**:
+
    - Create a new tenant directory with custom implementations
    - Override the required interface methods
    - Detailed guidance is available in:
@@ -123,11 +132,13 @@ Argus uses a tenant system that allows for customized processing logic for diffe
 Most components are configured via environment variables in `docker-compose.yml`:
 
 - **Sampler**:
+
   - `CAM_RTSP`: RTSP URL to capture from
   - `TARGET_FPS`: Frame sampling rate
   - `JPEG_Q`: JPEG encoding quality
 
 - **Inference**:
+
   - `CONFIDENCE_THRESHOLD`: Minimum confidence for person detection (default: 0.4)
   - `MODEL_NAME`: YOLOv8 model to use (default: yolov8n.pt)
   - `EVENT_CHECK_INTERVAL`: How often to check for events (seconds)

@@ -1,4 +1,4 @@
-# Argus
+# Ambral
 
 ## Run the project
 
