@@ -1,4 +1,4 @@
-# Ambral
+# Fun with CV on Demand
 
 ## Run the project
 
